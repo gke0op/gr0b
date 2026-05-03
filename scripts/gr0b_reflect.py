@@ -125,6 +125,7 @@ def parse_session(path: Path, agent: str) -> dict | None:
 
     return {
         "path":      path,
+        "stem":      path.stem,
         "agent":     agent,
         "date":      parse_date(path.stem),
         "worked_on": extract_bullets(sections["worked_on"]),
@@ -154,6 +155,38 @@ def load_sessions(days: int) -> list[dict]:
 
     sessions.sort(key=lambda s: s.get("date") or datetime.min)
     return sessions
+
+
+# ── Wikilinks ─────────────────────────────────────────────────────────────────
+
+def wikilink(stem: str) -> str:
+    """Format a session log stem as an Obsidian wikilink: [[2026-04-28_14-32]]."""
+    return f"[[{stem}]]"
+
+
+def decision_wikilinks(decisions_dir: Path) -> dict[str, str]:
+    """
+    Return a map of ngram_key → [[DR-NNN]] for all decision records.
+    Used to cross-link insight bullets to ADRs when topics overlap.
+    """
+    links = {}
+    if not decisions_dir.exists():
+        return links
+    for path in decisions_dir.glob("DR-*.md"):
+        # Extract id and title from frontmatter
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        m_id    = re.search(r"^id:\s*(\S+)",    text, re.M)
+        m_title = re.search(r'^title:\s*"?(.+?)"?\s*$', text, re.M)
+        if m_id and m_title:
+            dr_id  = m_id.group(1).strip()
+            title  = m_title.group(1).strip().strip('"')
+            key    = ngram_key(title, n=4)
+            if key:
+                links[key] = f"[[{dr_id}]]"
+    return links
 
 
 # ── Text utilities ────────────────────────────────────────────────────────────
@@ -205,6 +238,7 @@ def build_open_threads(sessions: list[dict], stale_after: int) -> str:
                 "text":  thread,
                 "agent": s["agent"],
                 "date":  s.get("date"),
+                "stem":  s.get("stem", ""),
             })
 
     if not clusters:
@@ -240,9 +274,20 @@ def build_open_threads(sessions: list[dict], stale_after: int) -> str:
             flags.append(f"{(now - oldest).days}d old")
         flags.append(f"{'·'.join(agents)}")
 
+        # Build source wikilinks (deduplicated, chronological)
+        seen_stems: set[str] = set()
+        source_links = []
+        for item in sorted(items, key=lambda i: i.get("date") or datetime.min):
+            stem = item.get("stem", "")
+            if stem and stem not in seen_stems:
+                seen_stems.add(stem)
+                source_links.append(wikilink(stem))
+
         stale_prefix = "🔴 " if is_stale else ""
         lines.append(f"- {stale_prefix}{rep}")
         lines.append(f"  _({', '.join(flags)})_")
+        if source_links:
+            lines.append(f"  _Sources: {' · '.join(source_links)}_")
 
     summary_parts = [f"{len(sorted_clusters)} threads"]
     if stale_count:
@@ -268,7 +313,8 @@ def build_recurring_failures(sessions: list[dict]) -> str:
             key = ngram_key(t)
             if key:
                 thread_clusters[key].append({
-                    "text": t, "agent": s["agent"], "date": s.get("date"),
+                    "text": t, "agent": s["agent"],
+                    "date": s.get("date"), "stem": s.get("stem", ""),
                 })
     persistent = {k: v for k, v in thread_clusters.items() if len(v) >= 3}
 
@@ -279,7 +325,8 @@ def build_recurring_failures(sessions: list[dict]) -> str:
             key = ngram_key(d, n=3)
             if key:
                 decision_clusters[key].append({
-                    "text": d, "agent": s["agent"], "date": s.get("date"),
+                    "text": d, "agent": s["agent"],
+                    "date": s.get("date"), "stem": s.get("stem", ""),
                 })
     revisited = {k: v for k, v in decision_clusters.items() if len(v) >= 2}
 
@@ -296,9 +343,18 @@ def build_recurring_failures(sessions: list[dict]) -> str:
             agents = sorted(set(i["agent"] for i in items))
             dates  = sorted(i["date"] for i in items if i["date"])
             span   = (dates[-1] - dates[0]).days if len(dates) > 1 else 0
+            seen_stems: set[str] = set()
+            source_links = []
+            for item in sorted(items, key=lambda i: i.get("date") or datetime.min):
+                stem = item.get("stem", "")
+                if stem and stem not in seen_stems:
+                    seen_stems.add(stem)
+                    source_links.append(wikilink(stem))
             lines.append(f"- **{rep}**")
             lines.append(f"  {len(items)} sessions · {', '.join(agents)}"
                          + (f" · over {span} days" if span else ""))
+            if source_links:
+                lines.append(f"  {' · '.join(source_links)}")
         sections.append("\n".join(lines))
 
     if revisited:
@@ -307,8 +363,10 @@ def build_recurring_failures(sessions: list[dict]) -> str:
         for key, items in sorted(revisited.items(), key=lambda x: -len(x[1])):
             lines.append(f"- **Topic:** `{key}`")
             for item in sorted(items, key=lambda i: i.get("date") or datetime.min):
-                d = item["date"].strftime("%Y-%m-%d") if item["date"] else "?"
-                lines.append(f"  - [{d} · {item['agent']}] {item['text']}")
+                d    = item["date"].strftime("%Y-%m-%d") if item["date"] else "?"
+                stem = item.get("stem", "")
+                ref  = wikilink(stem) if stem else d
+                lines.append(f"  - [{ref} · {item['agent']}] {item['text']}")
         sections.append("\n".join(lines))
 
     return "\n\n".join(sections) + "\n"
@@ -331,6 +389,7 @@ def build_contradictions(sessions: list[dict]) -> str:
                 "norm":  normalize(d),
                 "agent": s["agent"],
                 "date":  s.get("date"),
+                "stem":  s.get("stem", ""),
             })
 
     contradictions = []
@@ -368,12 +427,12 @@ def build_contradictions(sessions: list[dict]) -> str:
     lines = [f"> {len(contradictions)} potential contradiction(s) — review and resolve\n"]
 
     for a, b in contradictions:
-        a_date = a["date"].strftime("%Y-%m-%d") if a["date"] else "?"
-        b_date = b["date"].strftime("%Y-%m-%d") if b["date"] else "?"
+        a_ref = wikilink(a["stem"]) if a.get("stem") else (a["date"].strftime("%Y-%m-%d") if a["date"] else "?")
+        b_ref = wikilink(b["stem"]) if b.get("stem") else (b["date"].strftime("%Y-%m-%d") if b["date"] else "?")
         lines += [
             "---\n",
-            f"- **[{a_date} · {a['agent']}]** {a['text']}",
-            f"- **[{b_date} · {b['agent']}]** {b['text']}",
+            f"- **{a_ref} · {a['agent']}** — {a['text']}",
+            f"- **{b_ref} · {b['agent']}** — {b['text']}",
             "",
         ]
 
