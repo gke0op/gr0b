@@ -10,7 +10,7 @@ set -euo pipefail
 
 VAULT="$HOME/.gr0b"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GR0B_VERSION="0.1.0"
+GR0B_VERSION="0.2.0"
 
 # ── Colour output ─────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -470,6 +470,7 @@ cp "$SCRIPT_DIR/scripts/gr0b_map.py"            "$VAULT/scripts/"
 cp "$SCRIPT_DIR/scripts/gr0b_obsidian_sync.py"  "$VAULT/scripts/"
 cp "$SCRIPT_DIR/scripts/gr0b_reflect.py"        "$VAULT/scripts/"
 cp "$SCRIPT_DIR/scripts/gr0b_decisions.py"      "$VAULT/scripts/"
+cp "$SCRIPT_DIR/scripts/gr0b_doctor.py"         "$VAULT/scripts/"
 cp "$SCRIPT_DIR/scripts/verify.py"              "$VAULT/scripts/"
 chmod +x "$VAULT/scripts/"*.py
 ok "Scripts installed to ~/.gr0b/scripts/"
@@ -579,6 +580,9 @@ echo "     python3 ~/.gr0b/scripts/gr0b_map.py"
 echo ""
 echo "  Verify installation:"
 echo "  python3 ~/.gr0b/scripts/verify.py"
+echo ""
+echo "  System dashboard (live status of all subsystems):"
+echo "  python3 ~/.gr0b/scripts/gr0b_doctor.py"
 echo ""
 echo "  Restart Claude Desktop and Antigravity to activate MCP servers."
 echo "────────────────────────────────────────────"
