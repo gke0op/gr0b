@@ -201,6 +201,8 @@ Your memory lives at `~/.gr0b/`. Every session:
 1. Read `~/.gr0b/index.md` — map of all projects and agent status
 2. Scan `~/.gr0b/session-logs/claude/` for recent relevant sessions
 3. For codebase questions, use `graphify query "<question>"` from the project root
+4. Before any architectural decision, check existing records:
+   `python3 ~/.gr0b/scripts/gr0b_decisions.py search "<topic>"`
 
 **On end — write a session log:**
 Path: `~/.gr0b/session-logs/claude/YYYY-MM-DD_HH-MM.md`
@@ -210,6 +212,18 @@ Path: `~/.gr0b/session-logs/claude/YYYY-MM-DD_HH-MM.md`
 ## Key decisions made
 ## Files changed
 ## Open threads / next steps
+```
+
+**Decision records:**
+Write a record for every significant architectural choice:
+```
+python3 ~/.gr0b/scripts/gr0b_decisions.py new \
+  --title "..." --decision "..." --consequences "..."
+```
+If a new decision supersedes an old one, do not delete the old record:
+```
+python3 ~/.gr0b/scripts/gr0b_decisions.py supersede DR-001 \
+  --title "..." --decision "..." --reason "..."
 ```
 
 **MCP tools:**
@@ -248,6 +262,8 @@ Your memory lives at `~/.gr0b/`. Every session:
 1. Read `~/.gr0b/index.md` — map of all projects and agent status
 2. Scan `~/.gr0b/session-logs/gemini/` for recent relevant sessions
 3. For codebase questions, use `graphify query "<question>"` from the project root
+4. Before any architectural decision, check existing records:
+   `python3 ~/.gr0b/scripts/gr0b_decisions.py search "<topic>"`
 
 **On end — write a session log:**
 Path: `~/.gr0b/session-logs/gemini/YYYY-MM-DD_HH-MM.md`
@@ -257,6 +273,18 @@ Path: `~/.gr0b/session-logs/gemini/YYYY-MM-DD_HH-MM.md`
 ## Key decisions made
 ## Files changed
 ## Open threads / next steps
+```
+
+**Decision records:**
+Write a record for every significant architectural choice:
+```
+python3 ~/.gr0b/scripts/gr0b_decisions.py new \
+  --title "..." --decision "..." --consequences "..."
+```
+If a new decision supersedes an old one, do not delete the old record:
+```
+python3 ~/.gr0b/scripts/gr0b_decisions.py supersede DR-001 \
+  --title "..." --decision "..." --reason "..."
 ```
 
 **MCP tools:**
@@ -441,6 +469,7 @@ step "Installing gr0b scripts"
 cp "$SCRIPT_DIR/scripts/gr0b_map.py"            "$VAULT/scripts/"
 cp "$SCRIPT_DIR/scripts/gr0b_obsidian_sync.py"  "$VAULT/scripts/"
 cp "$SCRIPT_DIR/scripts/gr0b_reflect.py"        "$VAULT/scripts/"
+cp "$SCRIPT_DIR/scripts/gr0b_decisions.py"      "$VAULT/scripts/"
 cp "$SCRIPT_DIR/scripts/verify.py"              "$VAULT/scripts/"
 chmod +x "$VAULT/scripts/"*.py
 ok "Scripts installed to ~/.gr0b/scripts/"
