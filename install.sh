@@ -185,11 +185,12 @@ CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 mkdir -p "$HOME/.claude"
 [[ ! -f "$CLAUDE_MD" ]] && touch "$CLAUDE_MD"
 
-if grep -q "\.gr0b" "$CLAUDE_MD" 2>/dev/null; then
+if grep -q "gr0b:start" "$CLAUDE_MD" 2>/dev/null; then
     ok "CLAUDE.md already has .gr0b directive"
 else
     cat >> "$CLAUDE_MD" << 'EOF'
 
+<!-- gr0b:start -->
 ---
 
 ## .gr0b — Persistent Brain
@@ -214,6 +215,7 @@ Path: `~/.gr0b/session-logs/claude/YYYY-MM-DD_HH-MM.md`
 **MCP tools:**
 - `agentmemory` — cross-agent shared memory
 - `graphify` — codebase knowledge graph
+<!-- gr0b:end -->
 EOF
     ok "CLAUDE.md wired with .gr0b directive"
 fi
@@ -230,11 +232,12 @@ GEMINI_MD="$HOME/.gemini/GEMINI.md"
 mkdir -p "$HOME/.gemini"
 [[ ! -f "$GEMINI_MD" ]] && touch "$GEMINI_MD"
 
-if grep -q "\.gr0b" "$GEMINI_MD" 2>/dev/null; then
+if grep -q "gr0b:start" "$GEMINI_MD" 2>/dev/null; then
     ok "GEMINI.md already has .gr0b directive"
 else
     cat >> "$GEMINI_MD" << 'EOF'
 
+<!-- gr0b:start -->
 ---
 
 ## .gr0b — Persistent Brain
@@ -259,6 +262,7 @@ Path: `~/.gr0b/session-logs/gemini/YYYY-MM-DD_HH-MM.md`
 **MCP tools:**
 - `agentmemory` — cross-agent shared memory
 - `graphify` — codebase knowledge graph
+<!-- gr0b:end -->
 EOF
     ok "GEMINI.md wired with .gr0b directive"
 fi
@@ -354,14 +358,176 @@ EOF
     launchctl load "$PLIST" && ok "graphify watcher loaded (launchd)" || warn "launchctl load failed — run manually: graphify watch ~/Desktop"
 fi
 
+# ── agentmemory daemon ────────────────────────────────────────────────────────
+step "Setting up agentmemory daemon"
+
+NPX_BIN="$(command -v npx 2>/dev/null || true)"
+
+if [[ -z "$NPX_BIN" ]]; then
+    warn "npx not found — skipping agentmemory daemon (install Node.js first, then re-run install.sh)"
+else
+    NPX_DIR="$(dirname "$NPX_BIN")"
+
+    if [[ "$OS" == "Darwin" ]]; then
+        AM_PLIST="$HOME/Library/LaunchAgents/gr0b.agentmemory.plist"
+        mkdir -p "$HOME/Library/LaunchAgents"
+
+        cat > "$AM_PLIST" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>gr0b.agentmemory</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${NPX_BIN}</string>
+    <string>@agentmemory/agentmemory</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${VAULT}/session-logs/agentmemory.log</string>
+  <key>StandardErrorPath</key><string>${VAULT}/session-logs/agentmemory-error.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>${HOME}</string>
+    <key>PATH</key><string>${NPX_DIR}:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
+EOF
+
+        launchctl unload "$AM_PLIST" 2>/dev/null || true
+        if launchctl load "$AM_PLIST" 2>/dev/null; then
+            ok "agentmemory daemon registered and started (launchd)"
+        else
+            warn "launchctl load failed — run manually: npx @agentmemory/agentmemory"
+        fi
+
+    elif [[ "$OS" == "Linux" ]]; then
+        SYSTEMD_DIR="$HOME/.config/systemd/user"
+        mkdir -p "$SYSTEMD_DIR"
+
+        cat > "$SYSTEMD_DIR/gr0b-agentmemory.service" << EOF
+[Unit]
+Description=gr0b agentmemory MCP server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${NPX_BIN} @agentmemory/agentmemory
+Restart=always
+RestartSec=5
+Environment=HOME=${HOME}
+Environment=PATH=${NPX_DIR}:/usr/local/bin:/usr/bin:/bin
+StandardOutput=append:${VAULT}/session-logs/agentmemory.log
+StandardError=append:${VAULT}/session-logs/agentmemory-error.log
+
+[Install]
+WantedBy=default.target
+EOF
+
+        systemctl --user daemon-reload 2>/dev/null || true
+        if systemctl --user enable --now gr0b-agentmemory.service 2>/dev/null; then
+            ok "agentmemory daemon enabled and started (systemd --user)"
+        else
+            warn "systemd enable failed — run: systemctl --user enable --now gr0b-agentmemory.service"
+        fi
+    fi
+fi
+
 # ── Copy scripts into vault ───────────────────────────────────────────────────
 step "Installing gr0b scripts"
 
 cp "$SCRIPT_DIR/scripts/gr0b_map.py"            "$VAULT/scripts/"
 cp "$SCRIPT_DIR/scripts/gr0b_obsidian_sync.py"  "$VAULT/scripts/"
+cp "$SCRIPT_DIR/scripts/gr0b_reflect.py"        "$VAULT/scripts/"
 cp "$SCRIPT_DIR/scripts/verify.py"              "$VAULT/scripts/"
 chmod +x "$VAULT/scripts/"*.py
 ok "Scripts installed to ~/.gr0b/scripts/"
+
+# ── Daily reflection scheduler ────────────────────────────────────────────────
+step "Setting up daily reflection (gr0b_reflect.py)"
+
+PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
+
+if [[ -z "$PYTHON_BIN" ]]; then
+    warn "python3 not found — skipping daily reflection scheduler"
+else
+    if [[ "$OS" == "Darwin" ]]; then
+        REFLECT_PLIST="$HOME/Library/LaunchAgents/gr0b.reflect.plist"
+        mkdir -p "$HOME/Library/LaunchAgents"
+
+        cat > "$REFLECT_PLIST" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>gr0b.reflect</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${PYTHON_BIN}</string>
+    <string>${VAULT}/scripts/gr0b_reflect.py</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>9</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>${VAULT}/session-logs/reflect.log</string>
+  <key>StandardErrorPath</key><string>${VAULT}/session-logs/reflect-error.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>${HOME}</string>
+    <key>PATH</key><string>$(dirname "$PYTHON_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
+EOF
+
+        launchctl unload "$REFLECT_PLIST" 2>/dev/null || true
+        if launchctl load "$REFLECT_PLIST" 2>/dev/null; then
+            ok "Daily reflection scheduled at 09:00 (launchd)"
+        else
+            warn "launchctl load failed — run manually: python3 ~/.gr0b/scripts/gr0b_reflect.py"
+        fi
+
+    elif [[ "$OS" == "Linux" ]]; then
+        SYSTEMD_DIR="$HOME/.config/systemd/user"
+        mkdir -p "$SYSTEMD_DIR"
+
+        cat > "$SYSTEMD_DIR/gr0b-reflect.service" << EOF
+[Unit]
+Description=gr0b daily reflection pass
+
+[Service]
+Type=oneshot
+ExecStart=${PYTHON_BIN} ${VAULT}/scripts/gr0b_reflect.py
+Environment=HOME=${HOME}
+StandardOutput=append:${VAULT}/session-logs/reflect.log
+StandardError=append:${VAULT}/session-logs/reflect-error.log
+EOF
+
+        cat > "$SYSTEMD_DIR/gr0b-reflect.timer" << EOF
+[Unit]
+Description=gr0b daily reflection timer
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+        systemctl --user daemon-reload 2>/dev/null || true
+        if systemctl --user enable --now gr0b-reflect.timer 2>/dev/null; then
+            ok "Daily reflection scheduled (systemd timer)"
+        else
+            warn "systemd timer setup failed — add to cron: 0 9 * * * python3 ~/.gr0b/scripts/gr0b_reflect.py"
+        fi
+    fi
+fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
@@ -372,16 +538,14 @@ echo "  Next steps:"
 echo "  1. Open Obsidian → Open folder as vault → ~/.gr0b"
 echo "     (press Cmd+Shift+. to show hidden folders)"
 echo ""
-echo "  2. Start agentmemory before your sessions:"
-echo "     npx @agentmemory/agentmemory"
-echo ""
-echo "  3. Import your Claude history:"
+echo "  2. Import your Claude history:"
 echo "     agentmemory import-jsonl"
+echo "     (agentmemory starts automatically at login — no manual step needed)"
 echo ""
-echo "  4. Build your knowledge graph (first run):"
+echo "  3. Build your knowledge graph (first run):"
 echo "     cd ~/Desktop && graphify update ."
 echo ""
-echo "  5. Generate your brain map:"
+echo "  4. Generate your brain map:"
 echo "     python3 ~/.gr0b/scripts/gr0b_map.py"
 echo ""
 echo "  Verify installation:"

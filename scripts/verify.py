@@ -124,13 +124,35 @@ else:
           detail=str(desktop_cfg),
           fix="Install Claude Desktop then re-run install.sh")
 
-# Live agentmemory probe
+# agentmemory daemon registered?
+if platform.system() == "Darwin":
+    am_plist = HOME / "Library" / "LaunchAgents" / "gr0b.agentmemory.plist"
+    check("agentmemory launchd plist exists", am_plist.exists(),
+          fix="Re-run install.sh to register the daemon")
+    out, _ = run(["launchctl", "list"])
+    check("gr0b.agentmemory loaded in launchctl", "gr0b.agentmemory" in out,
+          fix="launchctl load ~/Library/LaunchAgents/gr0b.agentmemory.plist")
+elif platform.system() == "Linux":
+    out, rc = run(["systemctl", "--user", "is-enabled", "gr0b-agentmemory.service"])
+    check("agentmemory systemd service enabled", rc == 0,
+          fix="systemctl --user enable --now gr0b-agentmemory.service")
+    out, rc = run(["systemctl", "--user", "is-active", "gr0b-agentmemory.service"])
+    check("agentmemory systemd service active", rc == 0,
+          fix="systemctl --user start gr0b-agentmemory.service")
+elif platform.system() == "Windows":
+    out, rc = run('powershell -Command "Get-ScheduledTask -TaskName gr0b.agentmemory 2>$null | Select-Object -ExpandProperty State"')
+    check("agentmemory scheduled task registered",
+          rc == 0 and out.strip() in ("Ready", "Running"),
+          detail=out.strip() or "not found",
+          fix="Re-run install.ps1 to register the task")
+
+# Live agentmemory probe (works regardless of how it was started)
 out, rc = run("curl -s --max-time 3 http://localhost:3111/agentmemory/health 2>/dev/null")
 am_up = rc == 0 and any(k in out.lower() for k in ("ok", "healthy", "{"))
 check("agentmemory server reachable at :3111",
       am_up,
-      detail=out[:80] if out else "no response",
-      fix="Run: npx @agentmemory/agentmemory  (keep it running in a terminal)")
+      detail=out[:80] if out else "no response — daemon may still be starting",
+      fix="Check logs: cat ~/.gr0b/session-logs/agentmemory.log")
 
 print()
 
@@ -154,17 +176,22 @@ check("BRAIN_MAP.md generated",
 
 print()
 
-# ── Watcher (macOS launchd) ───────────────────────────────────────────────────
+# ── Graphify watcher daemon ───────────────────────────────────────────────────
 if platform.system() == "Darwin":
     print("\u2501\u2501\u2501 Graphify watcher (macOS) \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
 
     plist = HOME / "Library" / "LaunchAgents" / "gr0b.graphify.plist"
-    check("launchd plist exists", plist.exists(),
+    check("gr0b.graphify plist exists", plist.exists(),
           fix="Re-run install.sh")
 
     out, _ = run(["launchctl", "list"])
-    check("gr0b.graphify loaded",  "gr0b.graphify" in out,
+    check("gr0b.graphify loaded", "gr0b.graphify" in out,
           fix="launchctl load ~/Library/LaunchAgents/gr0b.graphify.plist")
+    print()
+
+elif platform.system() == "Linux":
+    print("\u2501\u2501\u2501 Graphify watcher (Linux) \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+    warn("Graphify watcher not yet configured — run manually: graphify watch ~/Desktop")
     print()
 
 # ─────────────────────────────────────────────────────────────────────────────

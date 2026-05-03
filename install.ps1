@@ -180,12 +180,12 @@ New-Item -ItemType Directory -Force -Path $CLAUDE_DIR | Out-Null
 if (-not (Test-Path $CLAUDE_MD)) { "" | Set-Content -Encoding UTF8 $CLAUDE_MD }
 
 $claudeContent = Get-Content -Raw $CLAUDE_MD -ErrorAction SilentlyContinue
-if ($claudeContent -match "\.gr0b") {
+if ($claudeContent -match "gr0b:start") {
     ok "CLAUDE.md already has .gr0b directive"
 } else {
     $directive = @'
 
-
+<!-- gr0b:start -->
 ---
 
 ## .gr0b — Persistent Brain
@@ -210,6 +210,7 @@ Path: `~/.gr0b/session-logs/claude/YYYY-MM-DD_HH-MM.md`
 **MCP tools:**
 - `agentmemory` — cross-agent shared memory
 - `graphify` — codebase knowledge graph
+<!-- gr0b:end -->
 '@
     Add-Content -Encoding UTF8 -Path $CLAUDE_MD -Value $directive
     ok "CLAUDE.md wired with .gr0b directive"
@@ -229,12 +230,12 @@ New-Item -ItemType Directory -Force -Path $GEMINI_DIR | Out-Null
 if (-not (Test-Path $GEMINI_MD)) { "" | Set-Content -Encoding UTF8 $GEMINI_MD }
 
 $geminiContent = Get-Content -Raw $GEMINI_MD -ErrorAction SilentlyContinue
-if ($geminiContent -match "\.gr0b") {
+if ($geminiContent -match "gr0b:start") {
     ok "GEMINI.md already has .gr0b directive"
 } else {
     $directive = @'
 
-
+<!-- gr0b:start -->
 ---
 
 ## .gr0b — Persistent Brain
@@ -259,6 +260,7 @@ Path: `~/.gr0b/session-logs/gemini/YYYY-MM-DD_HH-MM.md`
 **MCP tools:**
 - `agentmemory` — cross-agent shared memory
 - `graphify` — codebase knowledge graph
+<!-- gr0b:end -->
 '@
     Add-Content -Encoding UTF8 -Path $GEMINI_MD -Value $directive
     ok "GEMINI.md wired with .gr0b directive"

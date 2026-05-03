@@ -15,6 +15,7 @@ obsidian-notes/
 # ── Vault state ───────────────────────────────────────────────────────────────
 BRAIN_MAP.md
 index.md
+insights/
 .obsidian/workspace
 .obsidian/workspace.json
 .obsidian/cache
