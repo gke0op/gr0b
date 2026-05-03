@@ -1,0 +1,75 @@
+# gr0b.skill — optional agent skill file
+#
+# Drop this file into your agent's skills directory so it automatically
+# follows the gr0b memory protocol every session.
+#
+# Claude Code:  copy to ~/.claude/skills/gr0b.skill
+# Gemini:       copy to ~/.gemini/skills/gr0b.skill
+# Cursor:       add as a custom rule in your project .cursorrules
+#
+# This file is OPTIONAL — gr0b works without it. The skill makes the
+# session-log habit explicit and automatic rather than relying on the
+# agent inferring it from CLAUDE.md.
+
+---
+name: gr0b
+description: >
+  Persistent brain protocol — read memory on session start, write a session
+  log on session end, and use graphify + agentmemory for cross-session recall.
+triggers:
+  - on_session_start
+  - on_session_end
+
+on_session_start: |
+  ## gr0b — Session Start
+
+  1. Read `~/.gr0b/index.md` to orient yourself: what projects exist, what
+     agents have been active, and what open threads remain.
+
+  2. Check `~/.gr0b/session-logs/<agent>/` for logs from recent sessions
+     relevant to the current task. Prioritise the last 3–5.
+
+  3. If the task involves a specific codebase, run:
+         graphify query "<brief description of what you're working on>"
+     from the project root. This gives you a semantically grounded map of
+     the relevant code communities before you start exploring files.
+
+  4. If you need facts from previous sessions across all agents, use:
+         agentmemory recall "<query>"
+
+on_session_end: |
+  ## gr0b — Session End
+
+  Write a session log before closing. Path:
+      ~/.gr0b/session-logs/<agent>/YYYY-MM-DD_HH-MM.md
+
+  Template:
+  ```markdown
+  # Session — YYYY-MM-DD HH:MM
+
+  ## What was worked on
+  <!-- One paragraph summary -->
+
+  ## Key decisions made
+  <!-- Bullet list of meaningful choices and their rationale -->
+
+  ## Files changed
+  <!-- Paths relative to project root -->
+
+  ## Open threads / next steps
+  <!-- What remains, what to pick up next session -->
+  ```
+
+  Keep it brief — the goal is context recovery, not documentation for its
+  own sake. Future-you will thank present-you.
+
+notes: |
+  - Session logs are plain markdown. Open `~/.gr0b` as an Obsidian vault
+    to get a graph view across all your sessions and agents.
+  - BRAIN_MAP.md (regenerate: `python3 ~/.gr0b/scripts/gr0b_map.py`) gives
+    a high-level map of your codebase communities.
+  - agentmemory runs on port 3111. Start it with:
+        npx @agentmemory/agentmemory
+  - graphify watches your Desktop folder for changes. Check the watcher:
+        launchctl list | grep gr0b   (macOS)
+        Get-ScheduledTask gr0b*      (Windows)
