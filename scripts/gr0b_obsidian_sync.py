@@ -1,181 +1,215 @@
 #!/usr/bin/env python3
 """
-gr0b_obsidian_sync.py — sync graphify graph to Obsidian notes.
+gr0b_obsidian_sync.py v2 — project-level Obsidian sync.
 
-Reads  : ~/Desktop/graphify-out/graph.json
-Writes : ~/.gr0b/knowledge-graphs/  (one .md per community, not per node)
+Reads graphify-out/graph.json and writes ONE rich note per project
+(plus a brain index and an infrastructure summary) instead of thousands
+of per-symbol or per-community notes.
 
-Re-run any time to refresh:
+Improvements over v1:
+- Reuses gr0b_map.py community classification: stdlib / vendored /
+  minified noise is filtered into a single Infrastructure note.
+- Communities are MERGED by project name intentionally (v1 filename
+  collisions overwrote notes silently and lossily).
+- Hub symbols ranked by graph degree, with source paths.
+- Cross-project wikilinks weighted by edge count — Obsidian graph view
+  becomes your actual project constellation.
+- Old notes are archived, never deleted.
+
+Usage:
     python3 ~/.gr0b/scripts/gr0b_obsidian_sync.py
-
-Options:
-    --limit N    only write first N communities (default: all)
-    --min-nodes N skip communities smaller than N (default: 5)
+    python3 ~/.gr0b/scripts/gr0b_obsidian_sync.py --graph /path/graph.json --out /path/notes
 """
 import argparse
 import json
+import shutil
 import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
-GRAPH  = Path.home() / "Desktop" / "graphify-out" / "graph.json"
-VAULT  = Path.home() / ".gr0b"
-OUTDIR = VAULT / "knowledge-graphs"
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+from gr0b_map import classify_path, looks_like_minified_js  # noqa: E402
+
+MIN_NODES = 8     # skip tiny one-off clusters (same as gr0b_map)
+TOP_HUBS = 12     # hub symbols listed per project
+TOP_RELATED = 8   # related-project wikilinks per note
 
 
-def sanitise(name: str) -> str:
-    """Make a string safe for use as a filename."""
-    return "".join(c if c.isalnum() or c in " _-" else "_" for c in name).strip()
+def safe_name(name: str) -> str:
+    s = "".join(c if c.isalnum() or c in " _-" else "_" for c in name).strip()
+    return s[:80] or "Unknown"
 
 
-def derive_title(community_id: int, paths: list[str], labels: list[str]) -> str:
-    """Best-effort human title from paths or dominant label."""
-    if not paths:
-        top = sorted(set(labels), key=len, reverse=True)
-        return top[0] if top else f"Community {community_id}"
-
-    # Most common top-level directory segment
-    segments: dict[str, int] = defaultdict(int)
-    for p in paths:
-        parts = p.replace("\\", "/").split("/")
-        seg = parts[0] if parts else ""
-        # Skip hash-like prefixes (e.g. random 8-char folder names)
-        if seg and not (len(seg) == 8 and seg.isalnum()):
-            segments[seg] += 1
-        elif len(parts) > 1:
-            segments[parts[1]] += 1
-
-    if segments:
-        return max(segments, key=segments.get)
-    return f"Community {community_id}"
+def load_graph(graph_path: Path):
+    print(f"[gr0b-sync] Reading {graph_path} ({graph_path.stat().st_size/1e6:.0f} MB) ...")
+    with open(graph_path) as f:
+        data = json.load(f)
+    nodes = data.get("nodes", [])
+    edges = data.get("edges", data.get("links", []))
+    print(f"[gr0b-sync] {len(nodes):,} nodes, {len(edges):,} edges")
+    return nodes, edges
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--limit",     type=int, default=0,  help="max communities to write")
-    parser.add_argument("--min-nodes", type=int, default=5,  help="skip communities smaller than N")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--graph", type=Path,
+                    default=Path.home() / "Desktop" / "graphify-out" / "graph.json")
+    ap.add_argument("--out", type=Path,
+                    default=Path.home() / ".gr0b" / "knowledge-graphs" / "obsidian-notes")
+    args = ap.parse_args()
 
-    if not GRAPH.exists():
-        print(f"ERROR: graph.json not found at {GRAPH}")
+    if not args.graph.exists():
+        print(f"[gr0b-sync] ERROR: graph.json not found at {args.graph}")
         print("Run:  cd ~/Desktop && graphify update .")
         sys.exit(1)
 
-    print(f"Loading {GRAPH} …", flush=True)
-    with open(GRAPH) as f:
-        data = json.load(f)
+    nodes, edges = load_graph(args.graph)
 
-    nodes = data.get("nodes", [])
-    edges = data.get("edges", [])
-    print(f"  {len(nodes):,} nodes  {len(edges):,} edges")
-
-    # Build adjacency list for wikilinks
-    node_by_id: dict = {}
+    # ── Index nodes, group by community ───────────────────────────────────
+    node_attrs = {}
+    communities = defaultdict(lambda: {"ids": [], "labels": [], "paths": []})
     for n in nodes:
-        nid = n.get("id") or n.get("node_id") or n.get("label")
-        if nid is not None:
-            node_by_id[nid] = n
-
-    adj: dict[int, set[int]] = defaultdict(set)
-    for edge in edges:
-        s, t = edge.get("source"), edge.get("target")
-        if s is not None and t is not None:
-            adj[s].add(t)
-            adj[t].add(s)
-
-    # Group by community
-    communities: dict[int, dict] = defaultdict(
-        lambda: {"labels": [], "paths": [], "node_ids": []}
-    )
-    for node in nodes:
-        cid  = node.get("community", -1)
-        nid  = node.get("id") or node.get("node_id")
-        label = node.get("label", "")
-        path  = node.get("source_file", node.get("src", ""))
-        communities[cid]["labels"].append(label)
-        communities[cid]["node_ids"].append(nid)
+        nid = n.get("id")
+        label = n.get("label", str(nid))
+        path = n.get("source_file", n.get("src", ""))
+        cid = n.get("community", -1)
+        node_attrs[nid] = (label, path)
+        c = communities[cid]
+        c["ids"].append(nid)
+        c["labels"].append(label)
         if path:
-            communities[cid]["paths"].append(path)
+            c["paths"].append(path)
 
-    OUTDIR.mkdir(parents=True, exist_ok=True)
+    degree = defaultdict(int)
+    for e in edges:
+        degree[e.get("source")] += 1
+        degree[e.get("target")] += 1
 
-    # Sort communities by size
-    sorted_cids = sorted(
-        [cid for cid, info in communities.items() if len(info["labels"]) >= args.min_nodes],
-        key=lambda c: -len(communities[c]["labels"])
-    )
-    if args.limit:
-        sorted_cids = sorted_cids[:args.limit]
+    # ── Classify communities → projects / noise (gr0b_map logic) ─────────
+    projects = defaultdict(lambda: {"cids": [], "ids": [], "paths": [], "n": 0})
+    noise_counts = defaultdict(int)
 
+    for cid, info in communities.items():
+        if len(info["ids"]) < MIN_NODES:
+            continue
+        if looks_like_minified_js(info["labels"]):
+            noise_counts["Minified JS / build output"] += len(info["ids"])
+            continue
+
+        name_votes, noise_votes = defaultdict(int), defaultdict(int)
+        for p in info["paths"]:
+            name, is_noise = classify_path(p)
+            (noise_votes if is_noise else name_votes)[name] += 1
+
+        total = max(len(info["paths"]), 1)
+        if sum(noise_votes.values()) / total > 0.6:
+            label = max(noise_votes, key=noise_votes.get)
+            noise_counts[label] += len(info["ids"])
+            continue
+
+        pname = max(name_votes, key=name_votes.get) if name_votes else "Unknown"
+        proj = projects[pname]
+        proj["cids"].append(cid)
+        proj["ids"].extend(info["ids"])
+        proj["paths"].extend(info["paths"])
+        proj["n"] += len(info["ids"])
+
+    # node id → project name (for cross-links)
+    id_to_project = {}
+    for pname, proj in projects.items():
+        for nid in proj["ids"]:
+            id_to_project[nid] = pname
+
+    # ── Cross-project edge counts ─────────────────────────────────────────
+    related = defaultdict(lambda: defaultdict(int))
+    for e in edges:
+        pa = id_to_project.get(e.get("source"))
+        pb = id_to_project.get(e.get("target"))
+        if pa and pb and pa != pb:
+            related[pa][pb] += 1
+            related[pb][pa] += 1
+
+    # ── Prepare output dir (archive old notes, never delete) ─────────────
+    # Archive as a tarball, NOT a renamed directory: loose .md files left
+    # anywhere in the vault stay visible to Obsidian's graph view and turn
+    # into a giant hairball of stale nodes (3,746-node death-star, 2026-06).
+    out = args.out
+    if out.exists() and any(out.iterdir()):
+        import shutil
+        import tarfile
+        stamp = datetime.now().strftime("%Y%m%d-%H%M")
+        archive = out.parent / f"obsidian-notes-old-{stamp}.tar.gz"
+        print(f"[gr0b-sync] Archiving old notes → {archive}")
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(out, arcname=f"obsidian-notes-old-{stamp}")
+        shutil.rmtree(out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    # ── Write project notes ───────────────────────────────────────────────
+    sorted_projects = sorted(projects.items(), key=lambda x: -x[1]["n"])
     written = 0
-    for cid in sorted_cids:
-        info   = communities[cid]
-        labels = info["labels"]
-        paths  = info["paths"]
-        ids    = info["node_ids"]
+    for pname, proj in sorted_projects:
+        hubs = sorted(proj["ids"], key=lambda i: -degree[i])[:TOP_HUBS]
 
-        title = derive_title(cid, paths, labels)
+        path_counts = defaultdict(int)
+        for p in proj["paths"]:
+            parts = p.replace("\\", "/").split("/")
+            path_counts["/".join(parts[:2]) if len(parts) >= 2 else p] += 1
+        top_paths = sorted(path_counts, key=path_counts.get, reverse=True)[:3]
 
-        # Find communities that share edges with this one (inter-community links)
-        neighbour_cids: dict[int, int] = defaultdict(int)
-        for nid in ids:
-            if nid is None:
-                continue
-            for neighbour_id in adj.get(nid, set()):
-                nb_node = node_by_id.get(neighbour_id)
-                if nb_node:
-                    nb_cid = nb_node.get("community", -1)
-                    if nb_cid != cid:
-                        neighbour_cids[nb_cid] += 1
+        rel = sorted(related[pname].items(), key=lambda x: -x[1])[:TOP_RELATED]
 
-        top_neighbours = sorted(neighbour_cids.items(), key=lambda x: -x[1])[:5]
-
-        # Unique sorted paths (truncated)
-        top_paths = sorted(set(paths))[:20]
-        top_labels = sorted(set(labels), key=len, reverse=True)[:20]
-
-        md_lines = [
-            f"# {title}",
-            "",
-            f"**Community #{cid}** · {len(labels):,} nodes",
-            "",
-            "## Key symbols",
-            "",
-        ]
-        md_lines += [f"- `{l}`" for l in top_labels]
-        md_lines += [""]
-
+        lines = [f"# {pname}", "",
+                 f"**{proj['n']:,} nodes** · {len(proj['cids'])} communities", ""]
         if top_paths:
-            md_lines += ["## Source paths", ""]
-            md_lines += [f"- `{p}`" for p in top_paths]
-            if len(paths) > len(top_paths):
-                md_lines += [f"- … and {len(paths) - len(top_paths):,} more"]
-            md_lines += [""]
+            lines.append("## Roots")
+            lines += [f"- `{p}/…`" for p in top_paths]
+            lines.append("")
+        lines.append("## Hub symbols")
+        for nid in hubs:
+            label, path = node_attrs[nid]
+            loc = f" — `{path}`" if path else ""
+            lines.append(f"- **{label}** ({degree[nid]} links){loc}")
+        lines.append("")
+        if rel:
+            lines.append("## Connected projects")
+            lines += [f"- [[{safe_name(r)}]] ({c} edges)" for r, c in rel]
+            lines.append("")
+        lines += ["---", "", "*Generated by gr0b · https://github.com/gke0op/gr0b*"]
 
-        if top_neighbours:
-            md_lines += ["## Connected communities", ""]
-            for nb_cid, link_count in top_neighbours:
-                nb_info  = communities.get(nb_cid, {})
-                nb_title = derive_title(nb_cid, nb_info.get("paths", []), nb_info.get("labels", []))
-                safe_title = sanitise(nb_title)
-                md_lines += [f"- [[{safe_title}]] ({link_count} cross-links)"]
-            md_lines += [""]
-
-        md_lines += [
-            "---",
-            "",
-            "*Generated by gr0b · https://github.com/gke0op/gr0b*",
-        ]
-
-        fname = f"{sanitise(title)}.md"
-        (OUTDIR / fname).write_text("\n".join(md_lines))
+        (out / f"{safe_name(pname)}.md").write_text("\n".join(lines), encoding="utf-8")
         written += 1
 
-        if written % 100 == 0:
-            print(f"  {written} / {len(sorted_cids)} communities written …", flush=True)
+    # ── Index + infrastructure notes ──────────────────────────────────────
+    idx = ["# 00 — Brain Index", "",
+           f"_{len(nodes):,} nodes · {len(edges):,} edges · "
+           f"{written} projects · synced {datetime.now():%Y-%m-%d %H:%M}_", "",
+           "## Projects (by size)", ""]
+    idx += [f"- [[{safe_name(p)}]] — {info['n']:,} nodes"
+            for p, info in sorted_projects]
+    idx += ["", "See [[Infrastructure]] for filtered noise."]
+    (out / "00 — Brain Index.md").write_text("\n".join(idx), encoding="utf-8")
 
-    print(f"\nDone. {written} community notes written to {OUTDIR}")
+    infra = ["# Infrastructure", "",
+             "_Stdlib, vendored, and build-output communities filtered from the map._", ""]
+    infra += [f"- **{k}** — {v:,} nodes"
+              for k, v in sorted(noise_counts.items(), key=lambda x: -x[1])]
+    (out / "Infrastructure.md").write_text("\n".join(infra), encoding="utf-8")
+
+    # Self-install copy next to the notes for future reference
+    try:
+        shutil.copy2(__file__, out.parent / "gr0b_obsidian_sync.py")
+    except Exception:
+        pass
+
+    total_noise = sum(noise_counts.values())
+    print(f"[gr0b-sync] ✓ {written} project notes + index + infrastructure")
+    print(f"[gr0b-sync]   {total_noise:,} noise nodes filtered "
+          f"({len(noise_counts)} categories)")
+    print("[gr0b-sync] Obsidian → Reload vault → Graph view = project constellation.")
 
 
 if __name__ == "__main__":

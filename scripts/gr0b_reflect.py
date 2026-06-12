@@ -48,6 +48,19 @@ STOPWORDS = {
     "from", "into", "as", "up", "out", "by",
 }
 
+# Assistant sign-off / filler phrases — never real threads or decisions.
+# These are conversational theater that session logs inhale verbatim.
+JUNK_RE = re.compile(
+    r"(stand(ing)?\s+ready|await(ing)?\s+(the\s+)?(user|operator|gokce|next|further|instructions)"
+    r"|assist\s+(the\s+)?(user|operator)|ready\s+(for|to)\s+(the\s+)?next"
+    r"|fully\s+satisfied|no\s+further\s+(action|work|changes)"
+    r"|session\s+(is\s+)?(complete|concluded|ended)"
+    r"|next\s+request|anything\s+else|happy\s+to\s+(help|assist)"
+    r"|peak\s+.{0,25}\bstate|optimal\b.{0,20}\bstate|mission\s+accomplished"
+    r"|let\s+the\s+user\s+open|user\s+can\s+now\s+(open|see|enjoy))",
+    re.I,
+)
+
 # Verb pairs that suggest contradiction between two decisions
 CONTRADICTION_PAIRS = [
     (r"\buse\b",          r"\bavoid\b"),
@@ -95,7 +108,7 @@ def extract_bullets(raw_lines: list[str]) -> list[str]:
             continue
         # Strip list markers: -, *, •, numbered
         clean = re.sub(r"^(\d+\.\s+|[-*•]\s*)", "", stripped).strip()
-        if clean and len(clean) > 4:
+        if clean and len(clean) > 4 and not JUNK_RE.search(clean):
             result.append(clean)
     return result
 
@@ -217,6 +230,26 @@ def shared_content(a: str, b: str) -> int:
     return len(set(content_words(a)) & set(content_words(b)))
 
 
+def dedupe_burst(items: list[dict]) -> list[dict]:
+    """Collapse near-duplicate bullets logged repeatedly on the same day.
+
+    A single work-burst often gets written to several session logs minutes
+    apart (restarts, checkpoint saves). Identical text on the same calendar
+    day counts ONCE — recurrence should mean 'came back on another day',
+    not 'was logged six times in 23 minutes'.
+    """
+    seen: set[tuple[str, str]] = set()
+    out = []
+    for item in items:
+        day = item["date"].strftime("%Y-%m-%d") if item.get("date") else ""
+        key = (fp(item["text"]), day)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
 # ── Open threads ──────────────────────────────────────────────────────────────
 
 def build_open_threads(sessions: list[dict], stale_after: int) -> str:
@@ -244,12 +277,15 @@ def build_open_threads(sessions: list[dict], stale_after: int) -> str:
     if not clusters:
         return "_No open threads found in the analysed session logs._\n"
 
+    # Collapse same-day duplicate logging before counting recurrence
+    deduped = [dedupe_burst(v) for v in clusters.values()]
+
     # Sort: most recurring first, then most recent
     def sort_key(items):
         latest = max((i["date"] for i in items if i["date"]), default=datetime.min)
         return (-len(items), -(latest.timestamp() if latest else 0))
 
-    sorted_clusters = sorted(clusters.values(), key=sort_key)
+    sorted_clusters = sorted(deduped, key=sort_key)
     lines = []
     stale_count = 0
 
@@ -316,7 +352,8 @@ def build_recurring_failures(sessions: list[dict]) -> str:
                     "text": t, "agent": s["agent"],
                     "date": s.get("date"), "stem": s.get("stem", ""),
                 })
-    persistent = {k: v for k, v in thread_clusters.items() if len(v) >= 3}
+    persistent = {k: dv for k, v in thread_clusters.items()
+                  if len(dv := dedupe_burst(v)) >= 3}
 
     # Decisions with same subject appearing in 2+ sessions = potentially revisited
     decision_clusters: dict[str, list[dict]] = defaultdict(list)
@@ -328,7 +365,8 @@ def build_recurring_failures(sessions: list[dict]) -> str:
                     "text": d, "agent": s["agent"],
                     "date": s.get("date"), "stem": s.get("stem", ""),
                 })
-    revisited = {k: v for k, v in decision_clusters.items() if len(v) >= 2}
+    revisited = {k: dv for k, v in decision_clusters.items()
+                 if len(dv := dedupe_burst(v)) >= 2}
 
     if not persistent and not revisited:
         return "_No recurring failures detected. Sessions sampled: " + str(len(sessions)) + "._\n"
@@ -407,7 +445,9 @@ def build_contradictions(sessions: list[dict]) -> str:
             if pair_key in seen:
                 continue
 
-            if shared_content(a["text"], b["text"]) < 2:
+            # Require substantial topical overlap — 2 shared words pairs
+            # unrelated statements; 4 means they discuss the same thing.
+            if shared_content(a["text"], b["text"]) < 4:
                 continue
 
             for pat_a, pat_b in CONTRADICTION_PAIRS:
