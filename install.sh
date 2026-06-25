@@ -150,6 +150,12 @@ EOF
 ok "Obsidian configured (dark theme, colour-coded graph)"
 
 # ── index.md ──────────────────────────────────────────────────────────────────
+# NEVER clobber an existing index.md — it is the brain's living map, often
+# enriched by agents (status tables, infrastructure, decisions). Only create
+# the template on first install. (Bug fixed 2026-06-09: reinstall wiped index.)
+if [[ -f "$VAULT/index.md" ]]; then
+    ok "index.md already exists — preserved (template skipped)"
+else
 cat > "$VAULT/index.md" << EOF
 # .gr0b — Persistent Brain
 
@@ -177,6 +183,7 @@ Regenerate: \`python3 ~/.gr0b/scripts/gr0b_map.py\`
 EOF
 
 ok "index.md created"
+fi
 
 # ── Wire CLAUDE.md ────────────────────────────────────────────────────────────
 step "Wiring Claude Code"
@@ -352,6 +359,11 @@ fi
 if [[ "$OS" == "Darwin" ]]; then
     step "Setting up graphify watcher (launchd)"
 
+    # SAFETY: if you add --obsidian to this watcher, the --obsidian-dir must
+    # live OUTSIDE the vault (e.g. ~/.graphify/). Raw graphify output
+    # (GRAPH_REPORT + AST cache) inside the vault makes Obsidian's graph view
+    # render thousands of phantom _COMMUNITY_ nodes. Only curated notes from
+    # gr0b_obsidian_sync.py belong in the vault. (Lesson of 2026-06-12.)
     GRAPHIFY_BIN="$(command -v graphify || echo "$HOME/.local/bin/graphify")"
     PLIST="$HOME/Library/LaunchAgents/gr0b.graphify.plist"
     mkdir -p "$HOME/Library/LaunchAgents"

@@ -2,17 +2,24 @@
 """
 gr0b_map.py — generate a human-readable BRAIN_MAP.md from your graphify graph.
 
-Reads  : ~/Desktop/graphify-out/graph.json
-Writes : ~/.gr0b/BRAIN_MAP.md
+Reads  : ~/Desktop/graphify-out/graph.json   (override: first CLI arg)
+Writes : ~/.gr0b/BRAIN_MAP.md                (override: second CLI arg)
 
 Re-run any time to refresh the map:
     python3 ~/.gr0b/scripts/gr0b_map.py
+
+DR-003: loads via gr0b_graphlib (schema-defensive). REFUSES to write a map
+from a 0-edge export — that's how the roadless-BRAIN_MAP bug shipped silently.
 """
-import json
 import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from gr0b_graphlib import (  # noqa: E402
+    NOISE_PATH_PATTERNS, GraphSchemaError, is_noise_label, load_graph,
+)
 
 GRAPH   = Path.home() / "Desktop" / "graphify-out" / "graph.json"
 VAULT   = Path.home() / ".gr0b"
@@ -21,22 +28,10 @@ OUTPUT  = VAULT / "BRAIN_MAP.md"
 MIN_NODES = 8          # skip tiny one-off clusters
 TOP_N     = 10         # labels shown per project
 
-# ── Noise patterns (infrastructure / bundler noise) ───────────────────────────
-# Communities dominated by these path patterns are moved to an infrastructure
-# section rather than listed as your projects.
-NOISE_PATTERNS = [
-    # Zig standard library / C library headers
-    (r"lib/std/", "Zig stdlib"),
-    (r"lib/libc/", "Zig libc headers"),
-    (r"lib/compiler_rt", "Zig compiler-rt"),
-    # Bundler / obfuscated output (poly_scourge, Rollup chunks, etc.)
-    (r"poly_scourge", "Bundler output"),
-    # Common vendored / generated paths
-    (r"node_modules/", "node_modules"),
-    (r"vendor/", "Vendor code"),
-    (r"\.min\.", "Minified assets"),
-    (r"dist/bundle", "Build output"),
-]
+# ── Noise patterns ────────────────────────────────────────────────────────────
+# Single source of truth lives in gr0b_graphlib.NOISE_PATH_PATTERNS — shared
+# with the linker's target filter so map and links agree on what junk is.
+NOISE_PATTERNS = NOISE_PATH_PATTERNS
 
 # ── Heuristics ────────────────────────────────────────────────────────────────
 
@@ -83,27 +78,39 @@ def classify_path(path: str) -> tuple[str, bool]:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    if not GRAPH.exists():
-        print(f"ERROR: graph.json not found at {GRAPH}")
-        print("Run:  cd ~/Desktop && graphify update .")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    graph_path  = Path(args[0]) if len(args) > 0 else GRAPH
+    output_path = Path(args[1]) if len(args) > 1 else OUTPUT
+
+    if not graph_path.exists() and len(args) > 1:
+        print("Hint: multiple unexpected args — interactive zsh passes "
+              "'# comment' text as arguments; re-run without trailing comments.")
+
+    print(f"Loading {graph_path} …", flush=True)
+    try:
+        g = load_graph(graph_path)
+    except GraphSchemaError as e:
+        print(f"ERROR: {e}")
         sys.exit(1)
 
-    print(f"Loading {GRAPH} …", flush=True)
-    with open(GRAPH) as f:
-        data = json.load(f)
-
-    nodes = data.get("nodes", [])
-    edges = data.get("edges", [])
+    nodes = list(g.nodes.values())
+    edges = g.edges
     print(f"  {len(nodes):,} nodes  {len(edges):,} edges")
+
+    if not edges:
+        print("\nREFUSING to write BRAIN_MAP: export has 0 edges (stale or "
+              "edge-less export — the exact bug that shipped a roadless map).")
+        print("Diagnose first:  python3 ~/.gr0b/scripts/gr0b_graphlib.py --probe")
+        sys.exit(3)
 
     # ── Group nodes by community ──────────────────────────────────────────────
     communities: dict[int, dict] = defaultdict(
         lambda: {"labels": [], "paths": [], "folders": set()}
     )
     for node in nodes:
-        cid  = node.get("community", -1)
-        label = node.get("label", "")
-        path  = node.get("source_file", node.get("src", ""))
+        cid  = node.community
+        label = node.label
+        path  = node.source_file
         communities[cid]["labels"].append(label)
         if path:
             communities[cid]["paths"].append(path)
@@ -160,7 +167,7 @@ def main():
     sorted_noise    = sorted(noise.items(),    key=lambda x: x[1]["total"], reverse=True)
 
     # ── Write BRAIN_MAP.md ────────────────────────────────────────────────────
-    VAULT.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     lines = []
     a = lines.append
 
@@ -187,7 +194,8 @@ def main():
     a("")
 
     for i, (name, info) in enumerate(sorted_projects, 1):
-        top_labels = sorted(set(info["labels"]), key=len, reverse=True)[:TOP_N]
+        top_labels = sorted({l for l in info["labels"] if not is_noise_label(l)},
+                            key=len, reverse=True)[:TOP_N]
         cids_str   = ", ".join(f"#{c}" for c in sorted(info["cids"])[:5])
         if len(info["cids"]) > 5:
             cids_str += f" +{len(info['cids']) - 5} more"
@@ -227,9 +235,120 @@ def main():
     a("")
     a(f"*Generated by gr0b · https://github.com/gke0op/gr0b*")
 
-    OUTPUT.write_text("\n".join(lines))
-    print(f"\nBRAIN_MAP written → {OUTPUT}")
+    output_path.write_text("\n".join(lines))
+    print(f"\nBRAIN_MAP written → {output_path}")
     print(f"  {len(sorted_projects)} projects  |  {len(sorted_noise)} infra clusters")
+
+    # ── T4: Per-Project Map Pages ─────────────────────────────────────────────
+    import datetime
+    projects_dir = VAULT / "knowledge-graphs" / "obsidian-notes" / "projects"
+    projects_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, info in sorted_projects:
+        proj_cids = set(info["cids"])
+        proj_nodes = {nid: n for nid, n in g.nodes.items() if n.community in proj_cids}
+
+        # Calculate degrees within the project's communities
+        degrees = {nid: 0 for nid in proj_nodes}
+        in_degrees = {nid: 0 for nid in proj_nodes}
+        out_degrees = {nid: 0 for nid in proj_nodes}
+
+        for e in g.edges:
+            if e.source in proj_nodes and e.target in proj_nodes:
+                degrees[e.source] += 1
+                degrees[e.target] += 1
+                in_degrees[e.target] += 1
+                out_degrees[e.source] += 1
+
+        # Hubs
+        valid_hubs = [nid for nid in proj_nodes if not is_noise_label(proj_nodes[nid].label)]
+        # Deduplicate hubs by label, keeping the one with higher degree
+        hubs_by_label = {}
+        for nid in valid_hubs:
+            lbl = proj_nodes[nid].label
+            if lbl not in hubs_by_label or degrees[nid] > degrees[hubs_by_label[lbl]]:
+                hubs_by_label[lbl] = nid
+        top_hub_ids = sorted(hubs_by_label.values(), key=lambda nid: degrees[nid], reverse=True)[:8]
+        top_hubs_set = set(top_hub_ids)
+
+        # Spine
+        spine_edges = []
+        for e in g.edges:
+            if e.relation == "calls" and e.source in top_hubs_set and e.target in top_hubs_set:
+                spine_edges.append(e)
+
+        unique_spine = {}
+        for e in spine_edges:
+            k = (e.source, e.target)
+            if k not in unique_spine:
+                unique_spine[k] = e
+            else:
+                existing = unique_spine[k]
+                if (e.confidence_score, e.weight) > (existing.confidence_score, existing.weight):
+                    unique_spine[k] = e
+        spine_edges = list(unique_spine.values())
+
+        sorted_spine = sorted(
+            spine_edges,
+            key=lambda e: (e.confidence_score, e.weight),
+            reverse=True
+        )[:10]
+
+        # Entrypoints
+        entrypoints = []
+        for nid in proj_nodes:
+            if in_degrees[nid] == 0 and out_degrees[nid] > 0:
+                entrypoints.append(nid)
+        # Filter entrypoints
+        entrypoints = [nid for nid in entrypoints if not is_noise_label(proj_nodes[nid].label)]
+        # Deduplicate entrypoints by label, keeping the one with higher out-degree
+        entry_by_label = {}
+        for nid in entrypoints:
+            lbl = proj_nodes[nid].label
+            if lbl not in entry_by_label or out_degrees[nid] > out_degrees[entry_by_label[lbl]]:
+                entry_by_label[lbl] = nid
+        sorted_entrypoints = sorted(
+            entry_by_label.values(),
+            key=lambda nid: out_degrees[nid],
+            reverse=True
+        )[:5]
+
+        # Generate markdown content
+        proj_lines = []
+        proj_lines.append("---")
+        proj_lines.append(f"gr0b_generated: {datetime.date.today().isoformat()}")
+        proj_lines.append(f"project: {name}")
+        proj_lines.append("---")
+        proj_lines.append("")
+        proj_lines.append(f"# {name}")
+        proj_lines.append("")
+        proj_lines.append("## Hubs")
+        proj_lines.append("")
+        for nid in top_hub_ids:
+            proj_lines.append(f"- `{proj_nodes[nid].label}`")
+        if not top_hub_ids:
+            proj_lines.append("None found.")
+        proj_lines.append("")
+        proj_lines.append("## Spine")
+        proj_lines.append("")
+        for e in sorted_spine:
+            src_lbl = proj_nodes[e.source].label
+            dst_lbl = proj_nodes[e.target].label
+            proj_lines.append(f"- `{src_lbl} → {dst_lbl}`")
+        if not sorted_spine:
+            proj_lines.append("None found.")
+        proj_lines.append("")
+        proj_lines.append("## Entrypoints")
+        proj_lines.append("")
+        for nid in sorted_entrypoints:
+            proj_lines.append(f"- `{proj_nodes[nid].label}`")
+        if not sorted_entrypoints:
+            proj_lines.append("None found.")
+        proj_lines.append("")
+
+        # Write to file
+        proj_file = projects_dir / f"{name}.md"
+        proj_file.write_text("\n".join(proj_lines))
 
 
 if __name__ == "__main__":

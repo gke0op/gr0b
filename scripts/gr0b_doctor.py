@@ -24,6 +24,9 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gr0b_graphlib import load_graph
+
 VAULT    = Path.home() / ".gr0b"
 LOGS_DIR = VAULT / "session-logs"
 INSIGHTS = VAULT / "insights"
@@ -285,6 +288,48 @@ def collect_graph() -> dict:
     }
 
 
+def _frontmatter_section(text: str, key: str) -> str:
+    if not text.startswith("---\n"):
+        return ""
+    end = text.find("\n---", 4)
+    if end == -1:
+        return ""
+    inner = text[4:end + 1]
+    lines, out, on = inner.splitlines(), [], False
+    for line in lines:
+        if line.startswith(key + ":"):
+            on = True
+            continue
+        if on and (line.startswith("  ") or line.startswith("- ")):
+            out.append(line)
+            continue
+        on = False
+    return "\n".join(out)
+
+
+def collect_drift() -> list[str]:
+    warnings = []
+    if not DECISIONS.exists() or not GRAPH.exists():
+        return warnings
+    try:
+        graph = load_graph(GRAPH)
+    except Exception:
+        return warnings
+
+    cards = [p for p in sorted(DECISIONS.glob("*.md")) if p.name != "README.md"]
+    for p in cards:
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            continue
+        ids = re.findall(r"^\s*-\s+([\w.-]+)\s*(?:#|$)",
+                         _frontmatter_section(text, "gr0b_nodes"), re.M)
+        dead = graph.find_dead_refs(ids)
+        for d in dead:
+            warnings.append(f"DRIFT: {p.name} references dead node {d}")
+    return warnings
+
+
 # ── Rendering ─────────────────────────────────────────────────────────────────
 
 W = 48  # line width for the rule
@@ -308,6 +353,8 @@ def print_dashboard(data: dict):
     graph    = data["graph"]
 
     problems = []
+    for warning in data.get("drift", []):
+        problems.append(warning)
 
     # ── Services ──────────────────────────────────────────────────────────────
     section("Services")
@@ -455,6 +502,9 @@ def print_quiet(data: dict) -> int:
     if (data["graph"].get("age_days") or 0) > 7:
         problems.append(f"graph.json: {data['graph']['age_days']}d since last update")
 
+    for warning in data.get("drift", []):
+        problems.append(warning)
+
     if problems:
         for p in problems:
             print(f"! {p}")
@@ -480,6 +530,7 @@ def main():
         "insights":  collect_insights(),
         "decisions": collect_decisions(),
         "sessions":  collect_sessions(),
+        "drift":     collect_drift(),
         "timestamp": datetime.now().isoformat(),
     }
 
